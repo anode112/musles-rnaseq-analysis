@@ -1,0 +1,423 @@
+---
+title: "Muscle RNA-seq analysis"
+author: "Dmitry Ryazantsev"
+date: "`r Sys.Date()`"
+output:
+  html_document: 
+    toc: yes
+    toc_float: yes
+    toc_depth: 3
+    number_sections: true
+  pdf_document: 
+    latex_engine: xelatex
+    includes:
+      in_header: preamble.tex
+link-citations: yes
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, include=F}
+knitr::opts_chunk$set(echo = T)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+#renv::init(bioconductor = T)
+library(tidyverse)
+library(magrittr)
+library(tximport)
+library(matrixStats)
+library(ggplot2)
+library(DT)
+library(PCAtools)
+library(RColorBrewer)
+library(edgeR)
+library(ComplexHeatmap)
+library(DESeq2)
+library(org.Hs.eg.db)
+library(ggVennDiagram)
+library(clusterProfiler)
+library(readxl)
+library(magick) # raster plots
+#library(xlsx)
+options(bitmapType='cairo')
+```
+
+```{r eval=F, echo=F}
+library(devtools)
+BiocManager::install('clusterProfiler')
+renv::install('devtools')
+devtools::install_github("pachterlab/sleuth")
+renv::install('clusterProfiler')
+#package_url <- "https://cran.r-project.org/src/contrib/Archive/BH/BH_1.84.0-0.tar.gz"
+utils::install.packages(pkgs = package_url, repos = NULL)
+renv::settings$ppm.enabled(FALSE)
+renv::install("igraph")
+utils::install.packages(pkgs = 'igraph') # renv не мог поставить писал ошибку libglpk 
+#+поставил glpk в base конды, мб помогло
+```
+
+# RNA-seq of muscles
+
+We use files from SYSTEMS BIOLOGY NII, IMBP, 2nd RNA-seq, ok quality. (First RNA-seq failed because of EuroMint polymerase usage.) Fastq files there: `/data7a/bio/human_genomics/muscle/imbp_muscles_generozov/`
+
+During sequencing, the samples were divided into four lanes to avoid cell fallout. This would result in bias, with rare transcripts underrepresented and common ones overrepresented. We don't analyze this bias. Coverage is OK, and they also include exome and methylation information. Reads was not trimmed. Fastq read from 4 lanes was concatenated in 1 total file and quantified by Salmon.
+
+```{r meta}
+metadata <- read.csv("/data7a/bio/human_genomics/muscle/imbp_muscles_generozov/meta_imbp_muscles.csv")
+tx2gene <- read.csv("/data7a/bio/human_genomics/muscle/analysis/timur_files/itog/tx2gene.csv")
+met <- read.csv("/data7a/bio/human_genomics/muscle/analysis/timur_files/itog/samples.csv", stringsAsFactors = F) 
+met$Condition <- as.factor(met$Condition)
+met$Person <- as.character(met$Person)
+rownames(met) <- met$Sample
+
+file_n <- setNames(met$Filepath, met$Sample)
+```
+
+Expression matrix
+
+```{r tximport, eval=F}
+txi <- tximport(
+  file_n,
+  type = "salmon",
+  tx2gene = tx2gene,
+  ignoreTxVersion = TRUE,
+  countsFromAbundance = "no")
+saveRDS(txi, '/data7a/bio/human_genomics/muscle/analysis/RDS/txi.RDS')
+```
+
+Lets check values' distribution. Посмотрим распределние матрицы. Очистим от low образцов. Попробуем разделить денсити по образцам. We observe matrix in base state, not in log state.
+
+```{r, echo=F}
+txi <- readRDS('/data7a/bio/human_genomics/muscle/analysis/RDS/txi.RDS')
+tpm_matrix <- txi$abundance
+# we need Row Counts for DE analysis.
+rc_matrix <- txi$counts
+
+expr_vals <- unlist(as.data.frame(tpm_matrix))
+expr_vals <- data.frame(Expression = expr_vals)
+ggplot(expr_vals, aes(x = Expression)) +
+  geom_density(show.legend = FALSE) +
+  labs(title = "Density Plot of RNA-seq muscle Expression", x = "TPM expression Level", y = "Density") +
+  theme_minimal() + scale_x_continuous(limits = c(1, 20))
+
+df_long <- pivot_longer(as.data.frame(tpm_matrix), cols = everything(), names_to = "Sample", values_to = "Expression") #%>% mutate(Expression = log10(Expression + 1))
+
+ggplot(df_long, aes(x = Expression, color = Sample)) +
+  geom_density(show.legend = T) +
+  labs(title = "TPM Expression by Sample",
+    x = "log10 Expression Level", y = "Density") +
+  theme_minimal() + scale_x_continuous(limits = c(1, 3))
+```
+
+# PCA plots
+
+Lets plot pca to check bias.
+
+```{r make_pca}
+log_pca <- log10(tpm_matrix + 1)
+pca <- pca(log_pca, metadata = met, removeVar = 0.1)
+```
+
+```{r, fig.height=6, fig.width=7}
+screeplot(pca, components = getComponents(pca, seq_len(6)))
+col_by <- "Condition"
+biplot(
+  pca, x = "PC1", y = "PC2", pointSize = 3, colby = col_by,
+  legendPosition="right", showLoadings = F)
+```
+
+**Findings from PCA:**
+
+1.  There is an artifact sample 9_B1, it needs to be counted with and without it.
+2.  You can try to identify the tissue of 9_B1.
+3.  Points B1 and B2 are divided into groups, but half of the B2 points are mixed into the B1 group. This indicates either strong individual differences (e.g., different muscle growth rates—this requires calibrating the measurement instruments) or a technical error (missing the target and taking the wrong tissue, poor rRNA depletion, insufficient sample size).
+
+# Differential Expression
+
+Lets count with and without 9B outliers samples.
+
+```{r de_all}
+dds <- DESeqDataSetFromTximport(
+  txi,
+  colData = met,
+  design = ~ Person + Condition)
+
+keep <- rowSums(counts(dds) >= 10) >= ncol(dds)/2
+dds <- dds[keep, ]
+
+dds <- DESeq(dds)
+res_all <- results(dds, contrast = c("Condition", "Trained", "Untrained"))
+
+# Фильтрация значимых генов
+sig_genes_all <- as.data.frame(res_all)[!is.na(res_all$padj) & res_all$padj < 0.05 & abs(res_all$log2FoldChange) > 1, ]
+# add symbols
+sig_genes_all$symbol <- mapIds(org.Hs.eg.db, keys = rownames(sig_genes_all),
+column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first") 
+sig_genes_all <- sig_genes_all[order(sig_genes_all$padj), ]
+```
+
+Try without weird sample.
+
+```{r de_no_oult}
+met_filt <- met[met$Sample != "9_B1", ] 
+samples_to_keep <- met_filt$Sample
+
+txi_filt <- txi
+txi_filt$counts    <- txi$counts[, samples_to_keep]
+txi_filt$abundance <- txi$abundance[, samples_to_keep]
+txi_filt$length    <- txi$length[, samples_to_keep]
+rm(samples_to_keep)
+
+dds2 <- DESeqDataSetFromTximport(
+  txi_filt,
+  colData = met_filt,
+  design = ~ Person + Condition)
+keep <- rowSums(counts(dds2) >= 10) >= ncol(dds2)/2
+dds2 <- dds2[keep, ]
+
+dds2 <- DESeq(dds2, parallel = T)
+res_nooutl <- results(dds2, contrast = c("Condition", "Trained", "Untrained"))
+
+# Фильтрация значимых генов
+sig_genes_nooutl <- as.data.frame(res_nooutl)[!is.na(res_nooutl$padj) & res_nooutl$padj < 0.05 & abs(res_nooutl$log2FoldChange) > 1, ]
+# add symbols
+sig_genes_nooutl$symbol <- mapIds(org.Hs.eg.db, keys = rownames(sig_genes_nooutl),
+column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first") 
+sig_genes_nooutl <- sig_genes_nooutl[order(sig_genes_nooutl$padj), ]
+write_csv(sig_genes_nooutl, '/data7a/bio/human_genomics/muscle/analysis/download/DEGs_nooutl.csv')
+```
+
+Check intersection between outliers filtered and unfiltered.
+
+```{r}
+v <- list(Filtered = rownames(sig_genes_nooutl), `All samples` = rownames(sig_genes_all))
+ggVennDiagram(v) + scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") + coord_flip()
+```
+
+## Compare two ways
+
+```{r}
+print("Without outlier")
+summary(res_nooutl)
+print("All samples")
+summary(res_all)
+```
+
+The DEGs number increased, not decreased. If the outlier carried a biological signal, there would have been fewer of them. Here, it's the opposite—the outlier **smeared the variance**, weakened statistical power, and obscured the effects between groups.
+
+**MA-plot** — is a diagram in which each point is a gene.
+
+-   **A (average expression)** — average gene expression level (log scale)
+
+-   **M (minus / fold change)** — logarithm of the expression ratio between two conditions (log2FoldChange)
+
+    A = 0.5 \* log2(baseMean) M = log2FoldChange(sample2 / sample1)
+
+```{r}
+plotMA(res_nooutl, ylim = c(-5, 5), main = "MA-plot Filtered")
+plotMA(res_all, ylim = c(-5, 5), main = "MA-plot Unfiltered")
+```
+
+We need to look at the cloud's displacement to see if the normalization is correct.
+
+Conclusion from the MA plot: the Filtered values ​​are more closely clustered, meaning the dispersion has decreased, meaning the outlier was indeed noisy.
+
+Dispersion estimates for filtered and unfilt.
+
+```{r}
+plotDispEsts(dds, main = "Dispersion estimates unf")
+plotDispEsts(dds2, main = "Dispersion estimates flt")
+```
+
+Lets check correlation between all FC in all and no_outl groups.
+
+```{r, echo=F}
+df_all <- as.data.frame(res_all)
+df_no <- as.data.frame(res_nooutl)
+
+df_all$gene <- rownames(df_all)
+df_no$gene <- rownames(df_no)
+
+
+common <- merge(df_all[, c("gene", "log2FoldChange")],
+                df_no[, c("gene", "log2FoldChange")],
+                by = "gene",
+                suffixes = c("_all", "_nooutl"))
+
+
+cor(common$log2FoldChange_all, common$log2FoldChange_nooutl, use="complete")
+```
+
+Correlation is almost the same, no major difference.
+
+### Volcano plot and DEGs summary
+
+```{r fig.width=11, fig.height=7, echo=F}
+logFC_cutoff <- 1
+pval_cutoff <- 0.05
+
+res <- res_nooutl %>% as.data.frame() %>%
+  mutate(symbol = mapIds(org.Hs.eg.db, keys = rownames(.),
+column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first") )
+
+for_plot <- res %>% mutate(
+    Expression = case_when(
+      padj < pval_cutoff & log2FoldChange >  logFC_cutoff  ~ "Upregulated",
+      padj < pval_cutoff & log2FoldChange < -logFC_cutoff  ~ "Downregulated",
+      TRUE ~ "Not significant"))
+
+ggplot(for_plot, aes(x = log2FoldChange, y = -log10(padj), color = Expression)) +
+  geom_point(size = 1.5, alpha = 0.7) +
+  scale_color_manual(
+    name = "Gene expression",
+    values = c(
+      "Upregulated"   = "#D6604D",
+      "Downregulated" = "#2166AC",
+      "Not significant" = "grey70")) +
+  geom_vline(xintercept = c(-logFC_cutoff, logFC_cutoff), linetype = "dashed") +
+  geom_hline(yintercept = -log10(pval_cutoff), linetype = "dashed") +
+  geom_text_repel(
+    data = for_plot %>% filter(Expression != "Not significant"),
+    aes(label = symbol),
+    size = 2,
+    max.overlaps = 6
+  ) +
+  theme_minimal() +
+  labs(
+    x = expression(log[2]~Fold~Change),
+    y = expression(-log[10]~adjusted~pvalue),
+    title = "Volcano plot of DEGs after training")
+
+for_plot %>% summarise(n_upregulated = sum(Expression == "Upregulated"),
+											 n_downregulated = sum(Expression == "Downregulated"),
+											 total_DEGs = n_upregulated + n_downregulated) %>% DT::datatable(caption = " Up and downregulated DEGs")
+```
+
+### Boxplots for DEGs
+
+```{r}
+
+```
+
+### Comparison with IMBP precomputed DEG's list
+
+People from the Institute of Medical Problems calculated before us and gave us a ready-made table with DEGs; we need to compare our results with it.
+
+```{r}
+deg_imbp <- read_excel('/data7a/bio/human_genomics/muscle/analysis/upload/imbp_results_DEGs_filtered.xlsx')
+sig_genes_imbp <- deg_imbp %>% filter( abs(log2FoldChange) > 1, padj <= 0.05)
+
+v <- list(`My DEGs` = sig_genes_nooutl$symbol, IMBP = sig_genes_imbp$gene_name)
+ggVennDiagram(v) + scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") + coord_flip()
+
+v <- list(`My DEGs ensg` = rownames(sig_genes_nooutl), IMBP = sig_genes_imbp$gene_id)
+ggVennDiagram(v) + scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") + coord_flip()
+
+v <- list(`My DEGs` = sig_genes_all$symbol, IMBP = sig_genes_imbp$gene_name)
+ggVennDiagram(v) + scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") + coord_flip()
+
+```
+
+```{r}
+A <- sig_genes_nooutl$symbol
+B <- sig_genes_imbp$gene_name
+only_A <- setdiff(A, B)
+only_B <- setdiff(B, A)
+both_AB <- intersect(A, B)
+
+
+cat("Only in My DEGs (A):\n", paste(only_A, collapse = ", "), "\n\n")
+cat("Only in IMBP (B):\n", paste(only_B, collapse = ", "), "\n\n")
+cat("In both lists:\n", paste(both_AB, collapse = ", "), "\n")
+tibble(
+  Group = c("Only in My DEGs", "Only in IMBP", "In both lists", 'IMBP total', 'My DEGs total'),
+  Count = c(length(only_A), length(only_B), length(both_AB), length(B), length(A))
+) %>% DT::datatable(caption = "My DEGs vs IMBP comparison")
+rm(A,B, only_A, only_B, both_AB)
+```
+
+Compare ours and their LFC.
+
+```{r}
+for_plot <- as.data.frame(res_nooutl)
+for_plot$symbol <- mapIds(org.Hs.eg.db, keys = rownames(for_plot),
+column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first") 
+
+for_plot <- for_plot %>% left_join(deg_imbp, by=c("symbol"='gene_name')) %>% 
+  dplyr::rename(Our_LFC = log2FoldChange.x,
+imbp_LFC = log2FoldChange.y)
+
+ggplot(for_plot, aes(x=Our_LFC, y=imbp_LFC)) +
+  geom_point()
+```
+
+# GO enrichment
+
+Lets make an enrichment for filtered DEGs.
+
+Before the annotation, lets perform a gene enrichment analysis in Gene Ontology (GO) separately for three main categories (namespaces):
+
+1.  Molecular Function (MF). Describes the specific biochemical activity of a gene product (protein or RNA) at the molecular level. Examples: catalytic activity, ion binding, transport activity, DNA binding function. Essence: what exactly the molecule can do in a biochemical sense.
+2.  Biological Process (BP). Characterizes a coordinated series of molecular events leading to a result significant for the organism. Examples: cell cycle, glucose metabolism, immune response, apoptosis, nervous system development. Essence: what integral biological phenomenon is ensured by the work of the gene/protein.
+3.  Cellular Component (CC). Determines the subcellular localization or macromolecular complex where the gene product functions.
+
+pAdjustMethod = "fdr", pvalueCutoff = 0.01
+
+### MF enrich
+
+```{r}
+go_mf <- enrichGO(sig_genes_nooutl$symbol, OrgDb="org.Hs.eg.db", ont="MF", keyType= "SYMBOL", pAdjustMethod = "fdr", pvalueCutoff  = 0.01, qvalueCutoff  = 0.05)
+go_mf <- go_mf@result %>% arrange(p.adjust) %>% head(20) 
+DT::datatable(go_mf, caption = "GO MF enrich")
+write_csv(go_mf, '/data7a/bio/human_genomics/muscle/analysis/download/go_mf.csv')
+```
+
+### BP enrich
+
+```{r}
+go_bp_a <- enrichGO(sig_genes_nooutl$symbol, OrgDb="org.Hs.eg.db", ont="BP", keyType       = "SYMBOL", pAdjustMethod = "fdr", pvalueCutoff  = 0.01, qvalueCutoff  = 0.05)
+go_bp <- go_bp_a@result %>% arrange(p.adjust) %>% head(20)
+DT::datatable(go_bp, caption = "GO BP enrich")
+write_csv(go_bp, '/data7a/bio/human_genomics/muscle/analysis/download/go_bp.csv')
+```
+
+### CC enrich
+
+```{r}
+go_cc <- enrichGO(sig_genes_nooutl$symbol, OrgDb="org.Hs.eg.db", ont="CC", keyType       = "SYMBOL", pAdjustMethod = "fdr", pvalueCutoff  = 0.01, qvalueCutoff  = 0.05)
+go_cc <- go_cc@result %>% arrange(p.adjust)%>% head(20)
+DT::datatable(go_cc, caption = "GO CC enrich")
+write_csv(go_cc, '/data7a/bio/human_genomics/muscle/analysis/download/go_cc.csv')
+```
+
+### Other
+
+#### cnetplot bp
+
+```{r}
+barplot(go_bp_a, showCategory = 20) + ggtitle("GO enrichment filtered")
+#cnetplot(go, foldChange = NULL)
+cnetplot(go_bp_a, foldChange = sig_genes_nooutl$log2FoldChange)
+```
+
+#### **compare GO: All samples vs No outliers.**
+
+```{r fig.height= 7, fig.width=6}
+genes_list <- list(
+  NoOutlier = sig_genes_nooutl$symbol,
+  AllSamples = sig_genes_all$symbol
+)
+cc <- compareCluster(
+  geneClusters = genes_list,
+  fun = "enrichGO",
+  OrgDb = org.Hs.eg.db,
+  ont = "BP",
+  keyType = "SYMBOL",
+  pvalueCutoff = 0.01,
+  qvalueCutoff = 0.05,
+  pAdjustMethod = "BH"
+)
+dotplot(cc, showCategory = 20) + 
+  ggtitle("GO NoOutlier vs AllSamples")
+
+as.data.frame(cc) %>% arrange(p.adjust) %>% head(20) %>% DT::datatable()
+```
