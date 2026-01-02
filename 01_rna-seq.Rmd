@@ -19,7 +19,7 @@ editor_options:
 
 ```{r setup, include=F}
 knitr::opts_chunk$set(echo = T)
-knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, dpi = 72, fig.retina = 1, dev = "svglite", jpeg.quality = 85 ) 
 #renv::init(bioconductor = T)
 library(tidyverse)
 library(magrittr)
@@ -38,7 +38,7 @@ library(clusterProfiler)
 library(readxl)
 library(magick) # raster plots
 #library(xlsx)
-options(bitmapType='cairo')
+#options(bitmapType='cairo')
 ```
 
 ```{r eval=F, echo=F}
@@ -84,7 +84,7 @@ txi <- tximport(
 saveRDS(txi, '/data7a/bio/human_genomics/muscle/analysis/RDS/txi.RDS')
 ```
 
-Lets check values' distribution. Посмотрим распределние матрицы. Очистим от low образцов. Попробуем разделить денсити по образцам. We observe matrix in base state, not in log state.
+Lets check values' distribution. Попробуем разделить денсити по образцам. We observe matrix in base state, not in log state.
 
 ```{r, echo=F}
 txi <- readRDS('/data7a/bio/human_genomics/muscle/analysis/RDS/txi.RDS')
@@ -94,10 +94,6 @@ rc_matrix <- txi$counts
 
 expr_vals <- unlist(as.data.frame(tpm_matrix))
 expr_vals <- data.frame(Expression = expr_vals)
-ggplot(expr_vals, aes(x = Expression)) +
-  geom_density(show.legend = FALSE) +
-  labs(title = "Density Plot of RNA-seq muscle Expression", x = "TPM expression Level", y = "Density") +
-  theme_minimal() + scale_x_continuous(limits = c(1, 20))
 
 df_long <- pivot_longer(as.data.frame(tpm_matrix), cols = everything(), names_to = "Sample", values_to = "Expression") #%>% mutate(Expression = log10(Expression + 1))
 
@@ -335,7 +331,7 @@ tibble(
 rm(A,B, only_A, only_B, both_AB)
 ```
 
-Compare ours and their LFC.
+#### Compare ours and their LFC.
 
 ```{r}
 for_plot <- as.data.frame(res_nooutl)
@@ -349,6 +345,8 @@ imbp_LFC = log2FoldChange.y)
 ggplot(for_plot, aes(x=Our_LFC, y=imbp_LFC)) +
   geom_point()
 ```
+
+LFC correlate with each other, which proves that we analyzed data in a similar way.
 
 # GO enrichment
 
