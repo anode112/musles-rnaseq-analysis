@@ -3,9 +3,9 @@ title: "Muscle RNA-seq analysis"
 author: "Dmitry Ryazantsev"
 date: "`r Sys.Date()`"
 output:
-  html_document: 
+  github_document: 
     toc: yes
-    toc_float: yes
+    #toc_float: yes
     toc_depth: 3
     number_sections: true
   pdf_document: 
@@ -19,7 +19,9 @@ editor_options:
 
 ```{r setup, include=F}
 knitr::opts_chunk$set(echo = T)
-knitr::opts_chunk$set(warning = FALSE, message = FALSE, dpi = 72, fig.retina = 1, dev = "svglite", jpeg.quality = 85 ) 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, dpi = 72, fig.retina = 1, dev = "svglite", jpeg.quality = 85 )
+
+
 #renv::init(bioconductor = T)
 library(tidyverse)
 library(magrittr)
@@ -170,7 +172,7 @@ dds2 <- DESeqDataSetFromTximport(
 keep <- rowSums(counts(dds2) >= 10) >= ncol(dds2)/2
 dds2 <- dds2[keep, ]
 
-dds2 <- DESeq(dds2, parallel = T)
+dds2 <- DESeq(dds2)
 res_nooutl <- results(dds2, contrast = c("Condition", "Trained", "Untrained"))
 
 # Фильтрация значимых генов
@@ -285,7 +287,8 @@ ggplot(for_plot, aes(x = log2FoldChange, y = -log10(padj), color = Expression)) 
 
 for_plot %>% summarise(n_upregulated = sum(Expression == "Upregulated"),
 											 n_downregulated = sum(Expression == "Downregulated"),
-											 total_DEGs = n_upregulated + n_downregulated) %>% DT::datatable(caption = " Up and downregulated DEGs")
+											 total_DEGs = n_upregulated + n_downregulated) %>% knitr::kable(.)
+  #DT::datatable(caption = " Up and downregulated DEGs")
 ```
 
 ### Boxplots for DEGs
@@ -327,7 +330,7 @@ cat("In both lists:\n", paste(both_AB, collapse = ", "), "\n")
 tibble(
   Group = c("Only in My DEGs", "Only in IMBP", "In both lists", 'IMBP total', 'My DEGs total'),
   Count = c(length(only_A), length(only_B), length(both_AB), length(B), length(A))
-) %>% DT::datatable(caption = "My DEGs vs IMBP comparison")
+) %>% knitr::kable(.) #DT::datatable(caption = "My DEGs vs IMBP comparison")
 rm(A,B, only_A, only_B, both_AB)
 ```
 
@@ -365,7 +368,8 @@ pAdjustMethod = "fdr", pvalueCutoff = 0.01
 ```{r}
 go_mf <- enrichGO(sig_genes_nooutl$symbol, OrgDb="org.Hs.eg.db", ont="MF", keyType= "SYMBOL", pAdjustMethod = "fdr", pvalueCutoff  = 0.01, qvalueCutoff  = 0.05)
 go_mf <- go_mf@result %>% arrange(p.adjust) %>% head(20) 
-DT::datatable(go_mf, caption = "GO MF enrich")
+#DT::datatable(go_mf, caption = "GO MF enrich")
+knitr::kable(go_mf)
 write_csv(go_mf, '/data7a/bio/human_genomics/muscle/analysis/download/go_mf.csv')
 ```
 
@@ -374,7 +378,8 @@ write_csv(go_mf, '/data7a/bio/human_genomics/muscle/analysis/download/go_mf.csv'
 ```{r}
 go_bp_a <- enrichGO(sig_genes_nooutl$symbol, OrgDb="org.Hs.eg.db", ont="BP", keyType       = "SYMBOL", pAdjustMethod = "fdr", pvalueCutoff  = 0.01, qvalueCutoff  = 0.05)
 go_bp <- go_bp_a@result %>% arrange(p.adjust) %>% head(20)
-DT::datatable(go_bp, caption = "GO BP enrich")
+#DT::datatable(go_bp, caption = "GO BP enrich")
+knitr::kable(go_bp)
 write_csv(go_bp, '/data7a/bio/human_genomics/muscle/analysis/download/go_bp.csv')
 ```
 
@@ -383,7 +388,8 @@ write_csv(go_bp, '/data7a/bio/human_genomics/muscle/analysis/download/go_bp.csv'
 ```{r}
 go_cc <- enrichGO(sig_genes_nooutl$symbol, OrgDb="org.Hs.eg.db", ont="CC", keyType       = "SYMBOL", pAdjustMethod = "fdr", pvalueCutoff  = 0.01, qvalueCutoff  = 0.05)
 go_cc <- go_cc@result %>% arrange(p.adjust)%>% head(20)
-DT::datatable(go_cc, caption = "GO CC enrich")
+#DT::datatable(go_cc, caption = "GO CC enrich")
+knitr::kable(go_cc)
 write_csv(go_cc, '/data7a/bio/human_genomics/muscle/analysis/download/go_cc.csv')
 ```
 
@@ -417,5 +423,5 @@ cc <- compareCluster(
 dotplot(cc, showCategory = 20) + 
   ggtitle("GO NoOutlier vs AllSamples")
 
-as.data.frame(cc) %>% arrange(p.adjust) %>% head(20) %>% DT::datatable()
+as.data.frame(cc) %>% arrange(p.adjust) %>% head(20) %>% knitr::kable(.) #DT::datatable()
 ```
